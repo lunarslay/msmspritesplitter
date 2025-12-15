@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>TextureAtlas Sprite Extractor</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0e0e11;
+      color: #e6e6eb;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 32px;
+    }
+
+    h1 {
+      font-size: 28px;
+      font-weight: 600;
+      margin-bottom: 12px;
+    }
+
+    h2 {
+      font-size: 18px;
+      font-weight: 500;
+      margin: 16px 0 8px;
+    }
+
+    .card {
+      background: #15151c;
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+    }
+
+    .hidden { display: none; }
+
+    .dropzone {
+      border: 2px dashed #2d2d3a;
+      border-radius: 12px;
+      padding: 30px;
+      text-align: center;
+      transition: border-color .2s ease, background .2s ease;
+      cursor: pointer;
+    }
+
+    .dropzone.dragover {
+      border-color: #6a7cff;
+      background: rgba(106,124,255,0.08);
+    }
+
+    button {
+      appearance: none;
+      border: none;
+      background: linear-gradient(135deg, #6a7cff, #8f9bff);
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: .5;
+      cursor: not-allowed;
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+
+    .preview {
+      max-height: 360px;
+      overflow: auto;
+      border-radius: 10px;
+      background: #0b0b10;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .preview img {
+      max-width: 100%;
+      display: block;
+      border-radius: 8px;
+    }
+
+    .sprite-overlay {
+      position: relative;
+    }
+
+    .sprite-box {
+      position: absolute;
+      border: 1px solid rgba(106,124,255,0.6);
+      pointer-events: none;
+      box-sizing: border-box;
+    }
+
+    footer {
+      opacity: .5;
+      font-size: 12px;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- LOGIN -->
+  <div id="login" class="card">
+    <h1>Protected Tool</h1>
+    <p>Enter password to unlock</p>
+    <input type="password" id="pw" />
+    <br><br>
+    <button id="unlockBtn">Unlock</button>
+    <p id="pwmsg"></p>
+  </div>
+
+  <!-- APP -->
+  <div id="app" class="hidden">
+    <h1>TextureAtlas Sprite Extractor</h1>
+
+    <div class="card">
+      <div class="row">
+        <div>
+          <h2>Sprite Sheets</h2>
+          <div id="imgDrop" class="dropzone">Drag PNG / AVIF here</div>
+          <input type="file" id="imgInput" accept="image/png,image/avif" multiple hidden>
+          <div id="imgPreview" class="preview"></div>
+        </div>
+        <div>
+          <h2>TexturePacker XML</h2>
+          <div id="xmlDrop" class="dropzone">Drag XML here</div>
+          <input type="file" id="xmlInput" accept=".xml" multiple hidden>
+          <div id="xmlPreview" class="preview"></div>
+        </div>
+      </div>
+    </div>
+
+    <button id="exportBtn" disabled>Export ZIP</button>
+    <footer>Client-side only • No uploads • PNG & AVIF supported</footer>
+  </div>
+</div>
+
+<canvas id="canvas" class="hidden"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script>
+/******** PASSWORD ********/
+const PASSWORD_B64 = "Y2hhbmdlbWU="; // changeme
+
+const login = document.getElementById('login');
+const app   = document.getElementById('app');
+
+document.getElementById('unlockBtn').onclick = () => {
+  const pw = document.getElementById('pw').value;
+  if (btoa(pw) === PASSWORD_B64) {
+    login.remove();
+    app.classList.remove('hidden');
+  } else {
+    document.getElementById('pwmsg').innerText = 'Incorrect password';
+  }
+};
+
+/******** STATE ********/
+const images = new Map();
+const xmls   = [];
+
+/******** DROP HELPERS ********/
+function setupDrop(zone, input, handler) {
+  zone.onclick = () => input.click();
+  zone.ondragover = e => { e.preventDefault(); zone.classList.add('dragover'); };
+  zone.ondragleave = () => zone.classList.remove('dragover');
+  zone.ondrop = e => {
+    e.preventDefault(); zone.classList.remove('dragover');
+    handler([...e.dataTransfer.files]);
+  };
+  input.onchange = () => handler([...input.files]);
+}
+
+setupDrop(imgDrop, imgInput, handleImages);
+setupDrop(xmlDrop, xmlInput, handleXMLs);
+
+/******** IMAGE HANDLING ********/
+function handleImages(files) {
+  for (const f of files) {
+    if (!f.type.startsWith('image/')) continue;
+    images.set(f.name, f);
+
+    const img = document.createElement('img');
+    img.src = URL.createObjectURL(f);
+    imgPreview.appendChild(img);
+  }
+  updateExportState();
+}
+
+/******** XML HANDLING ********/
+function handleXMLs(files) {
+  for (const f of files) {
+    if (!f.name.endsWith('.xml')) continue;
+    xmls.push(f);
+
+    f.text().then(t => {
+      const div = document.createElement('div');
+      div.textContent = f.name + ' — ' + (t.match(/<sprite/g)||[]).length + ' sprites';
+      xmlPreview.appendChild(div);
+    });
+  }
+  updateExportState();
+}
+
+function updateExportState() {
+  exportBtn.disabled = !(images.size && xmls.length);
+}
+
+/******** EXPORT ********/
+exportBtn.onclick = async () => {
+  const zip = new JSZip();
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+
+  for (const xmlFile of xmls) {
+    const xml = new DOMParser().parseFromString(await xmlFile.text(), 'application/xml');
+    const atlas = xml.querySelector('TextureAtlas');
+    if (!atlas) continue;
+
+    const imagePath = atlas.getAttribute('imagePath');
+
+    // normalize imagePath (TexturePacker often includes folders)
+    const imageFileName = imagePath.split('/').pop();
+    const imageBase = imageFileName.replace(/\.[^.]+$/, '');
+
+    // try exact match first
+    let imgFile = images.get(imageFileName);
+
+    // fallback: match by basename (png <-> avif etc)
+    if (!imgFile) {
+      imgFile = [...images.values()].find(f => f.name.replace(/\.[^.]+$/, '') === imageBase);
+    }
+
+    if (!imgFile) {
+      console.warn('No matching image for', imagePath);
+      continue;
+    }
+
+    const img = await loadImage(imgFile);
+    const folder = zip.folder(imageBase);
+
+    for (const s of xml.querySelectorAll('sprite')) {
+      const name = s.getAttribute('n');
+      const x = +s.getAttribute('x');
+      const y = +s.getAttribute('y');
+      const w = +s.getAttribute('w');
+      const h = +s.getAttribute('h');
+      const r = s.getAttribute('r') === 'y';
+
+      canvas.width = r ? h : w;
+      canvas.height = r ? w : h;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+
+      if (r) {
+        ctx.save();
+        ctx.translate(canvas.width/2, canvas.height/2);
+        ctx.rotate(-Math.PI/2);
+        ctx.drawImage(img, x, y, w, h, -w/2, -h/2, w, h);
+        ctx.restore();
+      } else {
+        ctx.drawImage(img, x, y, w, h, 0, 0, w, h);
+      }
+
+      const blob = await new Promise(r => canvas.toBlob(r));
+      folder.file(name + '.png', blob);
+    }
+  }
+
+  const out = await zip.generateAsync({ type:'blob' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(out);
+  a.download = 'sprites.zip';
+  a.click();
+};
+
+function loadImage(file) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+function baseName(p) {
+  return p.replace(/\.[^.]+$/, '');
+}
+</script>
+</body>
+</html>
